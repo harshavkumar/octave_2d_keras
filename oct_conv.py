@@ -1,5 +1,4 @@
 import tensorflow.keras.backend as K
-
 from tensorflow.keras.layers import Layer, UpSampling2D, Add, Concatenate, Conv2D, Conv2DTranspose
 
 
@@ -10,94 +9,102 @@ class OCTCONV_LAYER(Layer):
             strides=(2, 2),
             dilation_rate=(1, 1),
             padding='same',
-            alpha_in=0.6,
-            alpha_out=0.6,
+            alpha=0.6,
+            kernel_initializer='glorot_uniform',
+            kernel_regularizer=None,
+            data_format=None,
+            kernel_constraint=None,
             **kwargs
         ):
+        assert alpha >=0 and alpha <= 1
+        assert filters >0 and isinstance(filters, int)
+
         self.filters = filters
         self.kernel_size = kernel_size
         self.strides = strides
         self.padding = padding
-        self.alpha_in = alpha_in
-        self.alpha_out = alpha_out
+        self.alpha = alpha
+        self.padding = padding
+        self.kernel_initializer = kernel_initializer
+        self.kernel_regularizer = kernel_regularizer
+        self.kernel_constraint = kernel_constraint
+        self.dilation_rate = dilation_rate
 
         if dilation_rate[0] > 1:
             self.strides = (1, 1)
 
-        self.dilation_rate = dilation_rate
+        self.low_op_channels = int(int(self.filters)*self.alpha)
+        self.high_op_channels = self.filters - self.low_op_channels
+
         super(OCTCONV_LAYER, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        print('INPUT_SHAP +E : {}'.format(input_shape))
-        op_channels = self.filters
-        low_op_channels = int(op_channels*self.alpha_out)
-        high_op_channels = op_channels-low_op_channels
 
+        assert len(input_shape) == 4
         inp_channels = input_shape[-1]
-        low_inp_channels = int(inp_channels*self.alpha_in)
-        high_inp_channels = inp_channels-low_inp_channels
+
+        # assertion for inputs
+        assert input_shape[1] // 2 >= self.kernel_size[0]
+        assert input_shape[2] // 2 >= self.kernel_size[1]
+
+        assert K.image_data_format() == "channels_last"
+
+        low_inp_channels = int(int(inp_channels)*self.alpha)
+        high_inp_channels = int(inp_channels)-low_inp_channels
 
         self.h_2_l = self.add_weight(
             name='hl',
-            shape=self.kernel_size + (high_inp_channels, low_op_channels),
-            initializer='he_normal'
+            shape=self.kernel_size + (high_inp_channels, self.low_op_channels),
+            initializer=self.kernel_initializer, regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint,
         )
         self.h_2_h = self.add_weight(
             name='hh',
-            shape=self.kernel_size + (high_inp_channels, high_op_channels),
-            initializer='he_normal'
+            shape=self.kernel_size + (high_inp_channels, self.high_op_channels),
+            initializer=self.kernel_initializer, regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint
         )
         self.l_2_h = self.add_weight(
             name='lh',
-            shape=self.kernel_size + (low_inp_channels, high_op_channels),
-            initializer='he_normal'
+            shape=self.kernel_size + (low_inp_channels, self.high_op_channels),
+            initializer=self.kernel_initializer, regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint
         )
         self.l_2_l = self.add_weight(
             name='ll',
-            shape=self.kernel_size + (low_inp_channels, low_op_channels),
-            initializer='he_normal'
+            shape=self.kernel_size + (low_inp_channels, self.low_op_channels),
+            initializer=self.kernel_initializer, regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint
         )
 
-        print('High 2 low : {}'.format(self.h_2_l.shape))
-        print('High 2 high : {}'.format(self.h_2_h.shape))
-        print('Low 2 high : {}'.format(self.l_2_h.shape))
-        print('Low 2 low : {}'.format(self.l_2_l.shape))
 
         super(OCTCONV_LAYER, self).build(input_shape)
 
     def call(self, x):
+
         inp_channels = int(x.shape[-1])
-        low_inp_channels = int(inp_channels*self.alpha_in)
-        high_inp_channels = inp_channels-low_inp_channels
+        low_inp_channels = int(int(inp_channels)*self.alpha)
+        high_inp_channels = int(inp_channels)-low_inp_channels
 
         high_inp = x[:,:,:, :high_inp_channels]
-        print('High input shape : {}'.format(high_inp.shape))
         low_inp = x[:,:,:, high_inp_channels:]
-        low_inp = K.pool2d(low_inp, (2, 2), strides=(2, 2), pool_mode='avg')
-        print('Low input shape : {}'.format(low_inp.shape))
+        low_inp = K.pool2d(low_inp, (2, 2), strides=self.strides, pool_mode='avg')
 
-        out_high_high = K.conv2d(high_inp, self.h_2_h, strides=(2, 2), padding='same')
-        print('OUT HIGH HIGH shape : {}'.format(out_high_high.shape))
-        out_low_high = UpSampling2D((2, 2))(K.conv2d(low_inp, self.l_2_h, strides=(2, 2), padding='same'))
-        print('OUT LOW HIGH shape : {}'.format(out_low_high.shape))
-        out_low_low = K.conv2d(low_inp, self.l_2_l, strides=(2, 2), padding='same')
-        print('OUT LOW LOW shape : {}'.format(out_low_low.shape))
-        out_high_low = K.pool2d(high_inp, (2, 2), strides=(2, 2), pool_mode='avg')
-        out_high_low = K.conv2d(out_high_low, self.h_2_l, strides=(2, 2), padding='same')
-        print('OUT HIGH LOW shape : {}'.format(out_high_low.shape))
+        out_high_high = K.conv2d(high_inp, self.h_2_h, strides=self.strides, padding=self.padding, data_format='channels_last')
+        out_low_high = UpSampling2D((2, 2))(K.conv2d(low_inp, self.l_2_h, strides=self.strides, padding=self.padding))
+        out_low_low = K.conv2d(low_inp, self.l_2_l, strides=self.strides, padding=self.padding, data_format='channels_last')
+        out_high_low = K.pool2d(high_inp, (2, 2), strides=self.strides, pool_mode='avg')
+        out_high_low = K.conv2d(out_high_low, self.h_2_l, strides=self.strides, padding=self.padding, data_format='channels_last')
 
         out_high = Add()([out_high_high, out_low_high])
 
-        print('OUT HIGH shape : {}'.format(out_high.shape))
 
         out_low = Add()([out_low_low, out_high_low])
 
         out_low = UpSampling2D((2, 2))(out_low)
 
-        print('OUT LOW shape : {}'.format(out_low.shape))
 
         out_final = K.concatenate([out_high, out_low], axis=-1)
-        print('OUT SHAPE : {}'.format(out_final.shape))
 
         out_final._keras_shape = self.compute_output_shape(out_final.shape)
 
@@ -105,4 +112,23 @@ class OCTCONV_LAYER(Layer):
 
     def compute_output_shape(self, inp_shape):
         return inp_shape
+
+if __name__ == '__main__':
+
+    visualize_model = True
+
+    from tensorflow.keras.models import Model
+    from tensorflow.keras.layers import Input
+
+    ip = Input(shape=(32,32,3))
+
+    x = OCTCONV_LAYER(filters=48)(ip)
+
+    model = Model(ip, x)
+    model.summary()
+
+    if visualize_model:
+        from tensorflow.keras.utils import plot_model
+
+        plot_model(model, to_file='octave_arch.png', show_shapes=False)
 
